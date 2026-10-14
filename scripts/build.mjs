@@ -7,4 +7,4 @@ await mkdir('dist',{recursive:true});
 await build({entryPoints:['runtime/http.ts'],outfile:'dist/server.mjs',bundle:true,platform:'node',format:'esm',target:'node22',packages:'external',tsconfig:'tsconfig.json'});
 await cp('runtime/schema.sql','dist/schema.sql');
 await cp('runtime/http-function.sql','dist/http-function.sql');
-await viteBuild({configFile:false,root:'github-ui',base:'/',plugins:[react()],resolve:{alias:{'@':path.resolve('.')}},publicDir:path.resolve('public'),build:{outDir:path.resolve('dist/public'),emptyOutDir:true,sourcemap:false}});
+await viteBuild({configFile:false,root:'github-ui',base:process.env.PAGES_BUILD?'/flight-risk-lab/':'/',plugins:[react()],resolve:{alias:{'@':path.resolve('.')}},publicDir:path.resolve('public'),build:{outDir:path.resolve(process.env.PAGES_BUILD?'outputs/github-pages':'dist/public'),emptyOutDir:true,sourcemap:false}});

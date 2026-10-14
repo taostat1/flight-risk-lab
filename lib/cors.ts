@@ -1,3 +1,5 @@
-export function allowedOrigin(req:Request){const origin=req.headers.get('origin');return !origin||origin===new URL(req.url).origin;}
-export function options(req:Request){return new Response(null,{status:allowedOrigin(req)?204:403});}
-export function withCors<T extends unknown[]>(fn:(req:Request,...rest:T)=>Promise<Response>){return async(req:Request,...rest:T)=>{if(!allowedOrigin(req))return Response.json({error:'请求来源无效。'},{status:403});return fn(req,...rest);};}
+const githubOrigin='https://taostat1.github.io';
+export function allowedOrigin(req:Request){const origin=req.headers.get('origin');return !origin||origin===new URL(req.url).origin||origin===githubOrigin;}
+function decorate(req:Request,res:Response){const origin=req.headers.get('origin');if(origin&&allowedOrigin(req)){res.headers.set('Access-Control-Allow-Origin',origin);res.headers.append('Vary','Origin');}return res;}
+export function options(req:Request){return decorate(req,new Response(null,{status:allowedOrigin(req)?204:403,headers:{'Access-Control-Allow-Methods':'GET, POST, OPTIONS','Access-Control-Allow-Headers':'Content-Type, Authorization, x-student-id, x-student-name, x-student-alias, x-task, x-submission-lease','Access-Control-Max-Age':'600'}}));}
+export function withCors<T extends unknown[]>(fn:(req:Request,...rest:T)=>Promise<Response>){return async(req:Request,...rest:T)=>{if(!allowedOrigin(req))return Response.json({error:'请求来源无效。'},{status:403});return decorate(req,await fn(req,...rest));};}

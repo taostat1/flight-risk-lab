@@ -79,6 +79,8 @@ assert.equal((await db.prepare('SELECT used FROM daily_quotas WHERE student_id=?
 assert.equal((await call('/api/staff/password','POST',JSON.stringify({current:'test-only-password',password:'changed-test-password'}),auth)).status,200);
 assert.equal((await call('/api/staff/me','GET',undefined,auth)).status,401);
 const badOrigin=await dispatch(new Request(origin+'/api/leaderboard',{headers:{Origin:'https://evil.test'}}));assert.equal(badOrigin.status,403);
+const corsCheck=await dispatch(new Request(origin+'/api/status',{headers:{Origin:'https://taostat1.github.io'}}));assert.equal(corsCheck.headers.get('Access-Control-Allow-Origin'),'https://taostat1.github.io');
+const corsPre=await dispatch(new Request(origin+'/api/submit',{method:'OPTIONS',headers:{Origin:'https://taostat1.github.io'}}));assert.equal(corsPre.status,204);assert.ok(corsPre.headers.get('Access-Control-Allow-Headers').includes('x-submission-lease'));
 const server=createServer(origin);await new Promise(r=>server.listen(0,'127.0.0.1',r));
 const base='http://127.0.0.1:'+server.address().port;
 assert.equal((await fetch(base+'/healthz')).status,200);
