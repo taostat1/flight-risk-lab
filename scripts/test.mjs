@@ -3,13 +3,40 @@ import {mkdir,readFile} from 'node:fs/promises';
 import {PGlite} from '@electric-sql/pglite';
 import assert from 'node:assert/strict';
 import {database} from '../runtime/database.mjs';
+import {httpDatabase} from '../runtime/http-database.mjs';
+import {bootstrapSQL} from '../runtime/bootstrap.mjs';
 process.env.NODE_ENV='test';
 await mkdir('outputs',{recursive:true});
 await build({stdin:{contents:"export {dispatch,createServer} from './runtime/http'; export {env,configureTest} from './runtime/env'; export {passwordHash} from './lib/staff-auth';",resolveDir:process.cwd()},bundle:true,platform:'node',format:'esm',packages:'external',outfile:'outputs/test-app.mjs',tsconfig:'tsconfig.json'});
 const {dispatch,createServer,env,configureTest,passwordHash}=await import('../outputs/test-app.mjs');
-const pg=new PGlite();await pg.exec(await readFile('runtime/schema.sql','utf8'));
+const pg=new PGlite();await pg.exec(await bootstrapSQL(new URL('../runtime/bootstrap.mjs',import.meta.url)));
+await pg.exec('SET search_path=flight_portal,pg_catalog');
+let loseResponse=false,httpCalls=0;
+const fetchImpl=async(url,options)=>{
+ assert.equal(url,'https://test-env.api.tcloudbasegateway.com/v1/rdb/exec-pgsql');
+ assert.equal(options.headers.Authorization,'Bearer fake-server-key');
+ const {sql,parameters,role}=JSON.parse(options.body);assert.equal(role,'cloudbase_postgres');httpCalls++;
+ try{const result=await pg.query(sql,parameters);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response after commit');}return Response.json(result.rows);}
+ catch(e){if(e instanceof TypeError)throw e;return Response.json({code:'DATABASE_'+e.code},{status:400});}
+};
 const objects=new Map();const storage={async put(key,body){objects.set(key,new Uint8Array(await new Response(body).arrayBuffer()));},async get(key){const bytes=objects.get(key);return bytes?{body:new Blob([bytes]).stream(),arrayBuffer:async()=>bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength)}:null;}};
-const db=database(pg);configureTest(db,storage);
+const db=httpDatabase({CLOUDBASE_ENV_ID:'test-env',CLOUDBASE_API_KEY:'fake-server-key'},{fetchImpl,sleep:async()=>{}});configureTest(db,storage);
+// Retry the same request id after a committed response is lost: no duplicate charge.
+loseResponse=true;await db.prepare("INSERT INTO daily_quotas(student_id,day,used) VALUES(?,?,1) ON CONFLICT(student_id,day) DO UPDATE SET used=used+1 WHERE used<10 RETURNING used").bind('RETRY001','test').first();
+assert.equal((await db.prepare('SELECT used FROM daily_quotas WHERE student_id=?').bind('RETRY001').first()).used,1);
+// A failing second statement rolls back the first one in the same HTTP request.
+await assert.rejects(()=>db.batch([db.prepare("INSERT INTO daily_quotas VALUES(?,?,1)").bind('ROLLBACK','test'),db.prepare('INSERT INTO daily_quotas VALUES(?,?,99)').bind('INVALID','test')]));
+assert.equal(await db.prepare('SELECT used FROM daily_quotas WHERE student_id=?').bind('ROLLBACK').first(),null);
+// Parameter text cannot become executable SQL or be rescanned as a placeholder.
+const attack="x'\\; DROP TABLE submissions; -- $1 $2";
+assert.equal((await db.prepare('SELECT ?::text AS value').bind(attack).first()).value,attack);
+await db.prepare('INSERT INTO daily_quotas VALUES(?,?,1)').bind('RETURNING','quoted').run();
+assert.equal((await db.prepare('SELECT used FROM daily_quotas WHERE student_id=?').bind('RETURNING').first()).used,1);
+let deniedCalls=0;const denied=httpDatabase({CLOUDBASE_ENV_ID:'test-env',CLOUDBASE_API_KEY:'invalid'},{fetchImpl:async()=>{deniedCalls++;return Response.json({code:'UNAUTHORIZED'},{status:401});},sleep:async()=>{}});
+await assert.rejects(()=>denied.prepare('SELECT 1').all());assert.equal(deniedCalls,1);
+await pg.exec('CREATE ROLE anon; GRANT USAGE ON SCHEMA flight_portal TO anon; SET ROLE anon');
+await assert.rejects(()=>pg.query("SELECT flight_portal.http_run_v1('denied','[]',false)"));
+await pg.exec('RESET ROLE; REVOKE USAGE ON SCHEMA flight_portal FROM anon');
 const origin='https://course.test';
 async function call(url,method='GET',body,headers={}){const r=await dispatch(new Request(origin+url,{method,headers:{Origin:origin,...headers},body}));const text=await r.text();return {status:r.status,headers:r.headers,data:JSON.parse(text)};}
 assert.equal((await call('/api/admin/submissions')).status,403);
@@ -65,4 +92,4 @@ for(const task of ['binary','multiclass']){
  assert.equal(scored.status,200,JSON.stringify(scored));assert.equal(scored.data.rows,697754);assert.equal(scored.data.auc,.5);
 }
 await new Promise(r=>server.close(r));await pg.close();
-console.log('PASS: PostgreSQL engine route integration, both AUC tasks, alias changes/duplicates, quota, slot exclusion, refund, teacher auth/password/history/download, same-origin checks, HTTP health/private-file isolation.');
+console.log('PASS: HTTP contract over PostgreSQL engine; atomic rollback, committed-response retry deduplication, SQL parameter injection resistance, anonymous permission denial; both 697754-row AUC tasks, 80 slot contenders, alias changes/duplicates, quota, refund, teacher auth/password/history/download, HTTP isolation. Requests: '+httpCalls);

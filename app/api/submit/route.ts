@@ -19,12 +19,17 @@ async function handler(req:Request){
  const lease=req.headers.get('x-submission-lease');
  const locked=lease?await db.prepare('UPDATE scoring_lock SET owner=?,expires=? WHERE id=1 AND owner=? AND expires>? RETURNING owner').bind(id,now+600000,student+':'+lease,now).first():await db.prepare('INSERT INTO scoring_lock(id,owner,expires) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET owner=excluded.owner,expires=excluded.expires WHERE scoring_lock.expires<? RETURNING owner').bind(id,now+600000,now).first();
  if(!locked)return json({error:'评分繁忙或上传时段已过期，请重新提交；本次未扣次数。',code:'scoring_busy'},429);
- let charged=false,recorded=false;
+ let charged=false,recorded=false,scored=false;
  try{
-  const quota=await db.prepare('INSERT INTO daily_quotas(student_id,day,used) VALUES(?,?,1) ON CONFLICT(student_id,day) DO UPDATE SET used=used+1 WHERE used<10 RETURNING used').bind(student,day).first<{used:number}>();
+  const quota=await db.prepare(`WITH charged AS (
+   INSERT INTO daily_quotas(student_id,day,used) VALUES(?,?,1)
+   ON CONFLICT(student_id,day) DO UPDATE SET used=daily_quotas.used+1 WHERE daily_quotas.used<10 RETURNING used
+  ), created AS (
+   INSERT INTO submissions(id,student_id,student_name,task,created_at,day,status,object_key,dataset_version,public_alias)
+   SELECT ?,?,?,?,?,?,?,?,?,? FROM charged RETURNING id
+  ) SELECT charged.used FROM charged CROSS JOIN created`).bind(student,day,id,student,name,task,new Date().toISOString(),day,'processing',key,dataset.id,alias).first<{used:number}>();
   if(!quota)return json({error:'该学号今天的10次提交额度已用完。'},429);charged=true;
-  await db.prepare('INSERT INTO submissions(id,student_id,student_name,task,created_at,day,status,object_key,dataset_version,public_alias) VALUES(?,?,?,?,?,?,?,?,?,?)').bind(id,student,name,task,new Date().toISOString(),day,'processing',key,dataset.id,alias).run();recorded=true;
-  // The incoming request body retains its known Content-Length for R2 streaming.
+  recorded=true;
   await bucket.put(key,req.body,{httpMetadata:{contentType:'text/csv'}});
   const truth=await bucket.get(dataset.label_key),prediction=await bucket.get(key);
   if(!truth||!prediction)throw new Error('Evaluation storage unavailable');
@@ -32,13 +37,17 @@ async function handler(req:Request){
   const digest=createHash('sha256');
   const result=await scoreCSV(prediction.body,labels,task!,b=>digest.update(b));
   await db.prepare('UPDATE submissions SET status=?,auc=?,binary_auc=?,details=?,row_count=?,file_hash=? WHERE id=?').bind('scored',result.auc,result.binary_auc,JSON.stringify(result),result.rows,digest.digest('hex'),id).run();
+  scored=true;
   const standing=await personalRank(db,dataset.id,task!,student);
   return json({submission_id:id,task,auc:result.auc,binary_auc:result.binary_auc,accuracy:result.accuracy,macro_f1:result.macro_f1,confusion_matrix:result.confusion_matrix,scoring_version:result.scoring_version,rows:result.rows,remaining:10-quota.used,standing});
- }catch(e){const expected=e instanceof SubmissionError;const message=expected?e.message:'评分服务暂时失败，请稍后重试；本次已退还额度。';
-  if(recorded)await db.prepare('UPDATE submissions SET status=?,error=? WHERE id=?').bind(expected?'invalid':'service_error',message,id).run();
-  if(charged&&!expected)await db.prepare('UPDATE daily_quotas SET used=max(0,used-1) WHERE student_id=? AND day=?').bind(student,day).run();
+ }catch(e){if(scored||(e as any)?.uncertain)return json({error:scored?'成绩已保存，但排名暂时未取到，请查看排行榜，勿重复提交。':'数据库响应尚未确认，请联系教师凭提交编号核对本次记录，勿立即重复提交。',submission_id:id},503);
+ const expected=e instanceof SubmissionError;const message=expected?e.message:'评分服务暂时失败，请稍后重试；本次已退还额度。';
+  const changes=[];
+  if(recorded)changes.push(db.prepare('UPDATE submissions SET status=?,error=? WHERE id=?').bind(expected?'invalid':'service_error',message,id));
+  if(charged&&!expected)changes.push(db.prepare('UPDATE daily_quotas SET used=max(0,used-1) WHERE student_id=? AND day=?').bind(student,day));
+  if(changes.length)await db.batch(changes);
   return json({error:message,submission_id:recorded?id:null},expected?400:503);
- }finally{await db.prepare('DELETE FROM scoring_lock WHERE id=1 AND owner=?').bind(id).run();}
+ }finally{try{await db.prepare('DELETE FROM scoring_lock WHERE id=1 AND owner=?').bind(id).run();}catch{console.error('Scoring lease release unconfirmed; lease will expire.');}}
 }
 
 export const POST=withCors(handler);

@@ -2,10 +2,18 @@ import pg from 'pg';
 import {readFile} from 'node:fs/promises';
 import {database} from './database.mjs';
 import {bucket} from './storage.mjs';
+import {httpDatabase} from './http-database.mjs';
+import {bootstrapSQL} from './bootstrap.mjs';
 // Tests supply only synthetic data, through the runtime entry point.
 export const env:any={};
 export function configureTest(db:any,storage:any){if(process.env.NODE_ENV!=='test')throw new Error('Test configuration disabled');env.DB=db;env.BUCKET=storage;}
 export async function initialize(){
+ if((process.env.DB_TRANSPORT??'http')==='http'){
+  const db=httpDatabase(process.env);await db.execute(await bootstrapSQL(import.meta.url));
+  env.DB=db;env.BUCKET=bucket(process.env);env.STAFF_ACCOUNTS_JSON=process.env.STAFF_ACCOUNTS_JSON;
+  return;
+ }
+ if(process.env.DB_TRANSPORT!=='postgres')throw new Error('DB_TRANSPORT must be http or postgres');
  if(!process.env.DATABASE_URL)throw new Error('Missing DATABASE_URL');
  pg.types.setTypeParser(20,Number);
  const mode=process.env.PG_SSL_MODE??'verify-full';
