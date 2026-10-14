@@ -1,4 +1,4 @@
-# 航班风险分析 · 课程评测
+# 数据挖掘与机器学习 · 航班风险分析
 
 学生入口：https://taostat1.github.io/flight-risk-lab/
 
