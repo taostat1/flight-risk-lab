@@ -1,0 +1,10 @@
+import {pbkdf2Sync,randomBytes} from 'node:crypto';
+import {createInterface} from 'node:readline';
+import {Writable} from 'node:stream';
+if(!process.stdin.isTTY)throw new Error('Run from an interactive terminal.');
+process.stdout.write('输入教师/助教初始密码（输入隐藏）：');
+const rl=createInterface({input:process.stdin,output:new Writable({write(c,e,done){done();}}),terminal:true});
+const password=await new Promise(resolve=>rl.question('',resolve));rl.close();
+if(password.length<10)throw new Error('Initial password must contain at least 10 characters');
+const accounts=[['bin_liu@fudan.edu.cn','teacher'],['24210690191@m.fudan.edu.cn','assistant'],['25210690190@m.fudan.edu.cn','assistant']].map(([email,role])=>{const salt=randomBytes(24).toString('hex');return {email,role,salt,hash:pbkdf2Sync(password,salt,100000,32,'sha256').toString('hex')};});
+console.log('\n将以下 JSON 仅粘贴到服务器 STAFF_ACCOUNTS_JSON 环境变量：\n'+JSON.stringify(accounts));

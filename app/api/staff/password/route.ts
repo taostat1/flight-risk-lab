@@ -1,0 +1,6 @@
+import {json,bindings} from '@/lib/server';
+import {getStaff,readBody,passwordHash,equal,hex,limited,sessionCookie} from '@/lib/staff-auth';
+import {withCors,options} from '@/lib/cors';
+export const dynamic='force-dynamic';
+export const OPTIONS=options;
+export const POST=withCors(async(req:Request)=>{const staff=await getStaff(req);if(!staff)return json({error:'请先登录。'},401);let b;try{b=await readBody(req);}catch{return json({error:'输入无效。'},400);}if(typeof b.current!=='string'||typeof b.password!=='string'||b.password.length<12||b.password.length>128)return json({error:'新密码须为12—128个字符。'},400);if(await limited(req,staff.email))return json({error:'尝试次数过多，请15分钟后再试。'},429);const {db}=bindings();const a=await db.prepare('SELECT salt,password_hash FROM staff_accounts WHERE email=?').bind(staff.email).first<{salt:string,password_hash:string}>();if(!a||!equal(await passwordHash(b.current,a.salt),a.password_hash))return json({error:'当前密码不正确。'},401);const salt=hex(crypto.getRandomValues(new Uint8Array(16)));await db.batch([db.prepare('UPDATE staff_accounts SET salt=?,password_hash=? WHERE email=?').bind(salt,await passwordHash(b.password,salt),staff.email),db.prepare('DELETE FROM staff_sessions WHERE email=?').bind(staff.email)]);const r=json({ok:true});r.headers.set('Set-Cookie',sessionCookie('',0));return r;});

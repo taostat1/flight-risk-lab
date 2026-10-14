@@ -1,0 +1,9 @@
+import {build} from 'esbuild';
+import {build as viteBuild} from 'vite';
+import react from '@vitejs/plugin-react';
+import {cp,mkdir} from 'node:fs/promises';
+import path from 'node:path';
+await mkdir('dist',{recursive:true});
+await build({entryPoints:['runtime/http.ts'],outfile:'dist/server.mjs',bundle:true,platform:'node',format:'esm',target:'node22',packages:'external',tsconfig:'tsconfig.json'});
+await cp('runtime/schema.sql','dist/schema.sql');
+await viteBuild({configFile:false,root:'github-ui',base:'/',plugins:[react()],resolve:{alias:{'@':path.resolve('.')}},publicDir:path.resolve('public'),build:{outDir:path.resolve('dist/public'),emptyOutDir:true,sourcemap:false}});
