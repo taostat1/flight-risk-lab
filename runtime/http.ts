@@ -1,3 +1,4 @@
+import {pruneSubmissionFiles} from '@/lib/retention';
 import http from 'node:http';
 import {Readable} from 'node:stream';
 import {pipeline} from 'node:stream/promises';
@@ -54,5 +55,7 @@ export function createServer(origin?:string){
 if(process.env.NODE_ENV!=='test'){
  const origin=process.env.PUBLIC_ORIGIN;
  if(origin&&!/^https:\/\/[^/]+$/.test(origin))throw new Error('Set PUBLIC_ORIGIN to the exact HTTPS domain without a trailing slash');
- await initialize();const server=createServer(origin);server.requestTimeout=600000;server.headersTimeout=60000;server.listen(Number(process.env.PORT??8080),'0.0.0.0',()=>console.log('Flight portal listening on port '+(process.env.PORT??8080)));
+ await initialize();
+ setInterval(()=>{pruneSubmissionFiles().catch(()=>console.error('Best-file cleanup pending: check COS DeleteObject permission.'));},60000).unref();
+ const server=createServer(origin);server.requestTimeout=600000;server.headersTimeout=60000;server.listen(Number(process.env.PORT??8080),'0.0.0.0',()=>console.log('Flight portal listening on port '+(process.env.PORT??8080)));
 }

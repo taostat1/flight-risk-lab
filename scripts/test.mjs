@@ -19,7 +19,7 @@ const fetchImpl=async(url,options)=>{
  try{const result=await pg.query(sql,parameters);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response after commit');}return Response.json(result.rows);}
  catch(e){if(e instanceof TypeError)throw e;return Response.json({code:'DATABASE_'+e.code},{status:400});}
 };
-const objects=new Map();const storage={async put(key,body){objects.set(key,new Uint8Array(await new Response(body).arrayBuffer()));},async get(key){const bytes=objects.get(key);return bytes?{body:new Blob([bytes]).stream(),arrayBuffer:async()=>bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength)}:null;}};
+const objects=new Map();const storage={async delete(key){objects.delete(key);},async put(key,body){objects.set(key,new Uint8Array(await new Response(body).arrayBuffer()));},async get(key){const bytes=objects.get(key);return bytes?{body:new Blob([bytes]).stream(),arrayBuffer:async()=>bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength)}:null;}};
 const db=httpDatabase({CLOUDBASE_ENV_ID:'test-env',CLOUDBASE_API_KEY:'fake-server-key'},{fetchImpl,sleep:async()=>{}});configureTest(db,storage);
 // Retry the same request id after a committed response is lost: no duplicate charge.
 loseResponse=true;await db.prepare("INSERT INTO daily_quotas(student_id,day,used) VALUES(?,?,1) ON CONFLICT(student_id,day) DO UPDATE SET used=used+1 WHERE used<10 RETURNING used").bind('RETRY001','test').first();
@@ -53,29 +53,48 @@ async function submit(student,alias,task='binary',valid=true){
  const content=valid?'test_id,'+(task==='binary'?'y_disruption':'y_class')+'\n'+Array.from({length:100},(_,i)=>(i+1)+',0').join('\n'):'bad\n';
  return call('/api/submit','POST',content,{'Content-Length':String(Buffer.byteLength(content)),'x-student-name':'Test student','x-student-id':student,'x-student-alias':encodeURIComponent(alias),'x-task':task,'x-submission-lease':slot.data.token});
 }
-let a=await submit('TEST0001','原别名');assert.equal(a.status,200,JSON.stringify(a));assert.equal(a.data.auc,.5);const firstId=a.data.submission_id;
-a=await submit('TEST0001','新别名','multiclass');assert.equal(a.status,200,JSON.stringify(a));assert.equal(a.data.auc,.5);
+let a=await submit('26210690001','原别名');assert.equal(a.status,200,JSON.stringify(a));assert.equal(a.data.auc,.5);const firstId=a.data.submission_id;
+a=await submit('26210690001','新别名','multiclass');assert.equal(a.status,200,JSON.stringify(a));assert.equal(a.data.auc,.5);
 assert.equal((await call('/api/leaderboard?task=binary')).data.entries[0].alias,'新别名');
-assert.equal((await submit('TEST0002','新别名')).status,200);
+assert.equal((await submit('26210690002','新别名')).status,200);
 assert.equal((await call('/api/leaderboard?task=binary')).data.entries.length,2);
-assert.equal((await submit('TEST0001','错误别名','binary',false)).status,400);
+assert.equal((await submit('26210690001','错误别名','binary',false)).status,400);
 assert.equal((await call('/api/leaderboard?task=binary')).data.entries[0].alias,'新别名');
-for(let i=3;i<10;i++)assert.equal((await submit('TEST0001','新别名')).status,200);
-assert.equal((await submit('TEST0001','新别名')).status,429);
+for(let i=3;i<10;i++)assert.equal((await submit('26210690001','新别名')).status,200);
+assert.equal((await submit('26210690001','新别名')).status,429);
+assert.equal([...objects.keys()].filter(k=>k.startsWith('submissions/')).length,3);
+assert.equal((await call('/api/submit-slot','POST',undefined,{'x-student-id':'26210690001x'})).status,400);
+assert.equal((await call('/api/submit-slot','POST',undefined,{'x-student-id':'25210690001'})).status,400);
 const board=(await call('/api/leaderboard')).data.entries;assert.ok(board.every(e=>Object.keys(e).sort().join(',')==='alias,auc,rank'));
 const records=await call('/api/admin/submissions','GET',undefined,auth);assert.equal(records.status,200,JSON.stringify(records));assert.equal(records.data.total,11);
 assert.equal(records.data.records.find(r=>r.id===firstId).alias,'原别名');
 assert.equal((await call('/api/admin/download/'+firstId)).status,403);
 const file=await dispatch(new Request(origin+'/api/admin/download/'+firstId,{headers:auth}));assert.equal(file.status,200);assert.ok((await file.text()).startsWith('test_id,y_disruption'));
-const lock=await call('/api/submit-slot','POST',undefined,{'x-student-id':'TEST0003'});assert.equal(lock.status,200);
-assert.equal((await call('/api/submit-slot','POST',undefined,{'x-student-id':'TEST0004'})).status,429);
-assert.equal(await db.prepare('SELECT used FROM daily_quotas WHERE student_id=?').bind('TEST0004').first(),null);
+// A better prediction replaces the old CSV; ties and worse scores keep the earlier best.
+const oldSecond=(await db.prepare("SELECT id,object_key FROM submissions WHERE student_id='26210690002' AND status='scored'").first());
+const perfect='test_id,y_disruption\n'+Array.from(labels,(v,i)=>(i+1)+','+(v>=2?1:0)).join('\n');
+const oldDelete=storage.delete;storage.delete=async()=>{throw Error('simulated DeleteObject denied');};
+const better=await call('/api/submit','POST',perfect,{'Content-Length':String(Buffer.byteLength(perfect)),'x-student-name':'Test','x-student-id':'26210690002','x-student-alias':encodeURIComponent('最佳成绩'),'x-task':'binary'});
+assert.equal(better.status,200);assert.equal(better.data.auc,1);assert.ok(objects.has(oldSecond.object_key));
+const bestId=better.data.submission_id;
+storage.delete=oldDelete;
+assert.equal((await submit('26210690002','较低成绩')).status,200);
+assert.ok(!objects.has(oldSecond.object_key));
+assert.equal((await call('/api/admin/download/'+oldSecond.id,'GET',undefined,auth)).status,410);
+const tied=await call('/api/submit','POST',perfect,{'Content-Length':String(Buffer.byteLength(perfect)),'x-student-name':'Test','x-student-id':'26210690002','x-student-alias':encodeURIComponent('同分提交'),'x-task':'binary'});
+assert.equal(tied.status,200);
+assert.equal((await db.prepare('SELECT object_key FROM submissions WHERE id=?').bind(tied.data.submission_id).first()).object_key,'');
+assert.ok((await db.prepare('SELECT object_key FROM submissions WHERE id=?').bind(bestId).first()).object_key);
+assert.equal([...objects.keys()].filter(k=>k.startsWith('submissions/')).length,3);
+const lock=await call('/api/submit-slot','POST',undefined,{'x-student-id':'26210690003'});assert.equal(lock.status,200);
+assert.equal((await call('/api/submit-slot','POST',undefined,{'x-student-id':'26210690004'})).status,429);
+assert.equal(await db.prepare('SELECT used FROM daily_quotas WHERE student_id=?').bind('26210690004').first(),null);
 await db.prepare('DELETE FROM scoring_lock').run();
-const simultaneous=await Promise.all(Array.from({length:80},(_,i)=>call('/api/submit-slot','POST',undefined,{'x-student-id':'LOAD'+String(i).padStart(4,'0')})));
+const simultaneous=await Promise.all(Array.from({length:80},(_,i)=>call('/api/submit-slot','POST',undefined,{'x-student-id':'26210690'+String(i+100).padStart(3,'0')})));
 assert.equal(simultaneous.filter(r=>r.status===200).length,1);assert.equal(simultaneous.filter(r=>r.status===429).length,79);
 await db.prepare('DELETE FROM scoring_lock').run();
-const originalPut=storage.put;storage.put=async()=>{throw new Error('Simulated storage failure');};assert.equal((await submit('TEST0005','存储错误')).status,503);storage.put=originalPut;
-assert.equal((await db.prepare('SELECT used FROM daily_quotas WHERE student_id=?').bind('TEST0005').first()).used,0);
+const originalPut=storage.put;storage.put=async()=>{throw new Error('Simulated storage failure');};assert.equal((await submit('26210690005','存储错误')).status,503);storage.put=originalPut;
+assert.equal((await db.prepare('SELECT used FROM daily_quotas WHERE student_id=?').bind('26210690005').first()).used,0);
 assert.equal((await call('/api/staff/password','POST',JSON.stringify({current:'test-only-password',password:'changed-test-password'}),auth)).status,200);
 assert.equal((await call('/api/staff/me','GET',undefined,auth)).status,401);
 const badOrigin=await dispatch(new Request(origin+'/api/leaderboard',{headers:{Origin:'https://evil.test'}}));assert.equal(badOrigin.status,403);
@@ -90,7 +109,7 @@ const large=Uint8Array.from({length:697754},(_,i)=>i%4);
 assert.equal((await call('/api/admin/import?kind=labels&version=scale-test','POST',large,{Authorization:'Bearer '+(await call('/api/staff/login','POST',JSON.stringify({email:'teacher@example.test',password:'changed-test-password'}))).data.token})).status,200);
 for(const task of ['binary','multiclass']){
  const csv='test_id,'+(task==='binary'?'y_disruption':'y_class')+'\n'+Array.from({length:large.length},(_,i)=>(i+1)+',0').join('\n');
- const scored=await call('/api/submit','POST',csv,{'Content-Length':String(Buffer.byteLength(csv)),'x-student-name':'Scale test','x-student-id':'SCALE001','x-student-alias':encodeURIComponent('规模测试'),'x-task':task});
+ const scored=await call('/api/submit','POST',csv,{'Content-Length':String(Buffer.byteLength(csv)),'x-student-name':'Scale test','x-student-id':'26210690999','x-student-alias':encodeURIComponent('规模测试'),'x-task':task});
  assert.equal(scored.status,200,JSON.stringify(scored));assert.equal(scored.data.rows,697754);assert.equal(scored.data.auc,.5);
 }
 await new Promise(r=>server.close(r));await pg.close();

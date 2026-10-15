@@ -18,6 +18,10 @@ export function bucket(config){
     await cos.putObject({...params(key),Body:createReadStream(file),ContentLength:size,ContentType:options.httpMetadata?.contentType??'application/octet-stream'});
    }finally{await rm(dir,{recursive:true,force:true});}
   },
+  async delete(key){
+   if(!/^submissions\/[a-f0-9-]+\.csv$/.test(key))throw new Error('Invalid deletion scope');
+   await cos.deleteObject(params(key));
+  },
   async get(key){
    const url=await new Promise((resolve,reject)=>cos.getObjectUrl({...params(key),Sign:true,Expires:600},(e,d)=>e?reject(e):resolve(d.Url)));
    const response=await fetch(url,{signal:AbortSignal.timeout(180000)});
