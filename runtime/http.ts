@@ -1,3 +1,4 @@
+import * as studentApi from '@/app/api/student/route';
 import {pruneSubmissionFiles} from '@/lib/retention';
 import http from 'node:http';
 import {Readable} from 'node:stream';
@@ -20,7 +21,7 @@ import * as submissions from '@/app/api/admin/submissions/route';
 import * as download from '@/app/api/admin/download/[id]/route';
 import * as importer from '@/app/api/admin/import/route';
 const routes:Record<string,any>={'/api/status':status,'/api/leaderboard':board,'/api/submit':submit,'/api/submit-slot':slot,'/api/submission-template':template,'/api/test-features':features,'/api/staff/login':login,'/api/staff/logout':logout,'/api/staff/me':me,'/api/staff/password':password,'/api/admin/submissions':submissions,'/api/admin/import':importer};
-export async function dispatch(req:Request){const pathname=new URL(req.url).pathname;const route=routes[pathname]??(/^\/api\/admin\/download\/[a-zA-Z0-9-]+$/.test(pathname)?download:null);if(!route)return Response.json({error:'未找到接口。'},{status:404});const handler=route[req.method];return handler?handler(req):Response.json({error:'不支持的请求方式。'},{status:405});}
+export async function dispatch(req:Request){const pathname=new URL(req.url).pathname;const route=(/^\/api\/student\/(login|logout|me|password|import)$/.test(pathname)?studentApi:routes[pathname])??(/^\/api\/admin\/download\/[a-zA-Z0-9-]+$/.test(pathname)?download:null);if(!route)return Response.json({error:'未找到接口。'},{status:404});const handler=route[req.method];return handler?handler(req):Response.json({error:'不支持的请求方式。'},{status:405});}
 export function createServer(origin?:string){
  const root=path.join(path.dirname(fileURLToPath(import.meta.url)),'public');
  return http.createServer(async(incoming,outgoing)=>{

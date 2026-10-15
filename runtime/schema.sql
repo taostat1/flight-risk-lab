@@ -8,3 +8,7 @@ CREATE INDEX IF NOT EXISTS submissions_created ON submissions(created_at DESC);
 CREATE TABLE IF NOT EXISTS staff_accounts(email text PRIMARY KEY,role text NOT NULL,salt text NOT NULL,password_hash text NOT NULL);
 CREATE TABLE IF NOT EXISTS staff_sessions(token_hash text PRIMARY KEY,email text NOT NULL,expires_at bigint NOT NULL);
 CREATE TABLE IF NOT EXISTS staff_login_limits(key text PRIMARY KEY,"window" bigint NOT NULL,used integer NOT NULL);
+
+CREATE TABLE IF NOT EXISTS student_accounts(student_id text PRIMARY KEY,student_name text NOT NULL,salt text NOT NULL,password_hash text NOT NULL,must_change integer NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS student_sessions(token_hash text PRIMARY KEY,student_id text NOT NULL,expires_at bigint NOT NULL);
+CREATE TABLE IF NOT EXISTS student_login_limits(student_id text PRIMARY KEY,"window" bigint NOT NULL,used integer NOT NULL);

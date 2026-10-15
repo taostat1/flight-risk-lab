@@ -1,3 +1,4 @@
+import {getStudent} from '@/lib/student-auth';
 import {pruneSubmissionFiles} from '@/lib/retention';
 import {withCors,options} from '@/lib/cors';
 import {bindings,json,sameOrigin,shanghaiDay} from '@/lib/server';
@@ -7,7 +8,9 @@ import {personalRank} from '@/lib/leaderboard';
 export const dynamic='force-dynamic';
 async function handler(req:Request){
  if(!sameOrigin(req))return json({error:'请求来源无效。'},403);
+ const account=await getStudent(req);if(!account)return json({error:'请先登录学生账号。'},401);if(account.must_change)return json({error:'首次登录须先修改密码。'},403);
  let name='',student='',alias='';try{name=decodeURIComponent(req.headers.get('x-student-name')??'').trim();student=decodeURIComponent(req.headers.get('x-student-id')??'').trim().toUpperCase();alias=decodeURIComponent(req.headers.get('x-student-alias')??'').normalize('NFKC').trim().replace(/ +/g,' ');}catch{return json({error:'姓名、学号或别名格式无效。'},400);}
+ name=account.student_name;student=account.student_id;
  if(!/^[\p{L}\p{N}_ ·-]{2,20}$/u.test(alias))return json({error:'别名须为2—20个中文、字母、数字、空格或 _ · -，请勿使用真实姓名或学号。'},400);
  const task=req.headers.get('x-task');
  if(!name||name.length>60||/[\x00-\x1f]/.test(name)||!/^26210690[0-9]{3}$/.test(student)||!['binary','multiclass'].includes(task??''))return json({error:'请填写姓名、以26210690开头的11位数字学号，并选择任务类型。'},400);

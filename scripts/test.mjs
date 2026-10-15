@@ -2,6 +2,7 @@ import {build} from 'esbuild';
 import {mkdir,readFile} from 'node:fs/promises';
 import {PGlite} from '@electric-sql/pglite';
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import {database} from '../runtime/database.mjs';
 import {httpDatabase} from '../runtime/http-database.mjs';
 import {bootstrapSQL} from '../runtime/bootstrap.mjs';
@@ -38,12 +39,41 @@ await pg.exec('CREATE ROLE anon; GRANT USAGE ON SCHEMA flight_portal TO anon; SE
 await assert.rejects(()=>pg.query("SELECT flight_portal.http_run_v1('denied','[]',false)"));
 await pg.exec('RESET ROLE; REVOKE USAGE ON SCHEMA flight_portal FROM anon');
 const origin='https://course.test';
-async function call(url,method='GET',body,headers={}){const r=await dispatch(new Request(origin+url,{method,headers:{Origin:origin,...headers},body}));const text=await r.text();return {status:r.status,headers:r.headers,data:JSON.parse(text)};}
+async function call(url,method='GET',body,headers={}){
+ const sid=headers['x-student-id'];
+ if(sid&&/^26210690[0-9]{3}$/.test(sid)&&!headers.Authorization){
+  const token=createHash('sha256').update('test-session:'+sid).digest('hex');
+  await db.prepare('INSERT INTO student_accounts VALUES(?,?,?,?,0) ON CONFLICT(student_id) DO NOTHING').bind(sid,'Test student','test-salt','test-hash').run();
+  await db.prepare('INSERT INTO student_sessions VALUES(?,?,?) ON CONFLICT(token_hash) DO NOTHING').bind(createHash('sha256').update(token).digest('hex'),sid,Date.now()+3600000).run();
+  headers={...headers,Authorization:'Bearer '+token};
+ }
+ const r=await dispatch(new Request(origin+url,{method,headers:{Origin:origin,...headers},body}));const text=await r.text();return {status:r.status,headers:r.headers,data:JSON.parse(text)};}
 assert.equal((await call('/api/admin/submissions')).status,403);
 env.STAFF_ACCOUNTS_JSON=JSON.stringify([{email:'teacher@example.test',role:'teacher',salt:'test-salt',hash:await passwordHash('test-only-password','test-salt')}]);
 const login=await call('/api/staff/login','POST',JSON.stringify({email:'teacher@example.test',password:'test-only-password'}));assert.equal(login.status,200,JSON.stringify(login));
 const auth={Authorization:'Bearer '+login.data.token};
 assert.equal((await call('/api/staff/me','GET',undefined,auth)).status,200);
+// Real student authentication: private roster import, mandatory password change, session revocation.
+const studentSalt='1'.repeat(48), studentId='26210690888';
+const roster=JSON.stringify([{student_id:studentId,student_name:'Auth test',salt:studentSalt,hash:await passwordHash('initial-test-password',studentSalt)}]);
+assert.equal((await call('/api/student/import','POST',roster)).status,403);
+assert.equal((await call('/api/student/import','POST',roster,auth)).status,200);
+assert.equal((await call('/api/student/login','POST',JSON.stringify({student_id:studentId,password:'wrong'}))).status,401);
+let studentLogin=await call('/api/student/login','POST',JSON.stringify({student_id:studentId,password:'initial-test-password'}));
+assert.equal(studentLogin.status,200);assert.equal(studentLogin.data.student.must_change,1);
+const initialAuth={Authorization:'Bearer '+studentLogin.data.token};
+assert.equal((await call('/api/submit-slot','POST',undefined,initialAuth)).status,403);
+assert.equal((await call('/api/student/password','POST',JSON.stringify({current:'initial-test-password',password:'changed-student-password'}),initialAuth)).status,200);
+assert.equal((await call('/api/student/me','GET',undefined,initialAuth)).status,401);
+assert.equal((await call('/api/student/login','POST',JSON.stringify({student_id:studentId,password:'initial-test-password'}))).status,401);
+studentLogin=await call('/api/student/login','POST',JSON.stringify({student_id:studentId,password:'changed-student-password'}));
+assert.equal(studentLogin.status,200);assert.equal(studentLogin.data.student.must_change,0);
+const studentAuth={Authorization:'Bearer '+studentLogin.data.token};
+// Re-import never resets a password already changed by a student.
+assert.equal((await call('/api/student/import','POST',roster,auth)).status,200);
+assert.equal((await call('/api/student/login','POST',JSON.stringify({student_id:studentId,password:'initial-test-password'}))).status,401);
+assert.equal((await call('/api/admin/submissions','GET',undefined,studentAuth)).status,403);
+assert.equal((await call('/api/submit-slot','POST')).status,401);
 const labels=Uint8Array.from({length:100},(_,i)=>i%4);
 assert.equal((await call('/api/admin/import?kind=labels&version=test-v1','POST',labels,auth)).status,200);
 assert.equal((await call('/api/admin/import?kind=labels&version=test-v1','POST',labels,auth)).status,409);
@@ -63,8 +93,8 @@ assert.equal((await call('/api/leaderboard?task=binary')).data.entries[0].alias,
 for(let i=3;i<10;i++)assert.equal((await submit('26210690001','新别名')).status,200);
 assert.equal((await submit('26210690001','新别名')).status,429);
 assert.equal([...objects.keys()].filter(k=>k.startsWith('submissions/')).length,3);
-assert.equal((await call('/api/submit-slot','POST',undefined,{'x-student-id':'26210690001x'})).status,400);
-assert.equal((await call('/api/submit-slot','POST',undefined,{'x-student-id':'25210690001'})).status,400);
+assert.equal((await call('/api/submit-slot','POST',undefined,{'x-student-id':'26210690001x'})).status,401);
+assert.equal((await call('/api/submit-slot','POST',undefined,{'x-student-id':'25210690001'})).status,401);
 const board=(await call('/api/leaderboard')).data.entries;assert.ok(board.every(e=>Object.keys(e).sort().join(',')==='alias,auc,rank'));
 const records=await call('/api/admin/submissions','GET',undefined,auth);assert.equal(records.status,200,JSON.stringify(records));assert.equal(records.data.total,11);
 assert.equal(records.data.records.find(r=>r.id===firstId).alias,'原别名');
@@ -112,5 +142,13 @@ for(const task of ['binary','multiclass']){
  const scored=await call('/api/submit','POST',csv,{'Content-Length':String(Buffer.byteLength(csv)),'x-student-name':'Scale test','x-student-id':'26210690999','x-student-alias':encodeURIComponent('规模测试'),'x-task':task});
  assert.equal(scored.status,200,JSON.stringify(scored));assert.equal(scored.data.rows,697754);assert.equal(scored.data.auc,.5);
 }
+const spoof='test_id,y_disruption\n'+Array.from({length:697754},(_,i)=>(i+1)+',0').join('\n');
+const spoofed=await call('/api/submit','POST',spoof,{...studentAuth,'Content-Length':String(Buffer.byteLength(spoof)),'x-student-name':'Someone else','x-student-id':'26210690001','x-student-alias':encodeURIComponent('身份测试'),'x-task':'binary'});
+assert.equal(spoofed.status,200,JSON.stringify(spoofed));
+const owner=await db.prepare('SELECT student_id,student_name FROM submissions WHERE id=?').bind(spoofed.data.submission_id).first();
+assert.equal(owner.student_id,studentId);assert.equal(owner.student_name,'Auth test');
+assert.equal((await call('/api/student/logout','POST',undefined,studentAuth)).status,200);
+assert.equal((await call('/api/student/me','GET',undefined,studentAuth)).status,401);
+console.log('PASS: roster authentication, password changes, session revocation, student/staff isolation, spoofed identity ignored.');
 await new Promise(r=>server.close(r));await pg.close();
 console.log('PASS: HTTP contract over PostgreSQL engine; atomic rollback, committed-response retry deduplication, SQL parameter injection resistance, anonymous permission denial; both 697754-row AUC tasks, 80 slot contenders, alias changes/duplicates, quota, refund, teacher auth/password/history/download, HTTP isolation. Requests: '+httpCalls);
